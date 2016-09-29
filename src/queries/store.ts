@@ -23,6 +23,7 @@ import {
 } from 'graphql';
 
 import assign = require('lodash.assign');
+import isEqual = require('lodash.isequal');
 
 export interface QueryStore {
   [queryId: string]: QueryStoreValue;
@@ -34,7 +35,9 @@ export interface QueryStoreValue {
   minimizedQueryString: string;
   minimizedQuery: SelectionSetWithRoot;
   variables: Object;
+  previousVariables: Object;
   loading: boolean;
+  stopped: boolean;
   networkError: Error;
   graphQLErrors: GraphQLError[];
   forceFetch: boolean;
@@ -56,6 +59,14 @@ export function queries(
   if (isQueryInitAction(action)) {
     const newState = assign({}, previousState) as QueryStore;
 
+    const previousQuery = previousState[action.queryId];
+    let previousVariables: Object;
+    if (action.storePreviousVariables && previousQuery) {
+      if (!isEqual(previousQuery.variables, action.variables)) {
+        previousVariables = previousQuery.variables;
+      }
+    }
+
     // XXX right now if QUERY_INIT is fired twice, like in a refetch situation, we just overwrite
     // the store. We probably want a refetch action instead, because I suspect that if you refetch
     // before the initial fetch is done, you'll get an error.
@@ -65,7 +76,9 @@ export function queries(
       minimizedQueryString: action.minimizedQueryString,
       minimizedQuery: action.minimizedQuery,
       variables: action.variables,
+      previousVariables,
       loading: true,
+      stopped: false,
       networkError: null,
       graphQLErrors: null,
       forceFetch: action.forceFetch,
@@ -92,6 +105,7 @@ export function queries(
       loading: false,
       networkError: null,
       graphQLErrors: resultHasGraphQLErrors ? action.result.errors : null,
+      previousVariables: null,
     }) as QueryStoreValue;
 
     return newState;
@@ -123,13 +137,17 @@ export function queries(
     newState[action.queryId] = assign({}, previousState[action.queryId], {
       loading: action.complete,
       networkError: null,
+      previousVariables: null,
     }) as QueryStoreValue;
 
     return newState;
   } else if (isQueryStopAction(action)) {
     const newState = assign({}, previousState) as QueryStore;
 
-    delete newState[action.queryId];
+    newState[action.queryId] = assign({}, previousState[action.queryId], {
+      loading: false,
+      stopped: true,
+    }) as QueryStoreValue;
 
     return newState;
   } else if (isStoreResetAction(action)) {

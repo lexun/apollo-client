@@ -134,7 +134,7 @@ export class QueryManager {
   private queryTransformer: QueryTransformer;
   private resultTransformer: ResultTransformer;
   private resultComparator: ResultComparator;
-  private queryListeners: { [queryId: string]: QueryListener };
+  private queryListeners: { [queryId: string]: QueryListener[] };
 
   private idCounter = 0;
 
@@ -339,7 +339,10 @@ export class QueryManager {
         return;
       }
 
-      if (!queryStoreValue.loading || queryStoreValue.returnPartialData) {
+      const shouldNotifyIfLoading = queryStoreValue.returnPartialData
+        || queryStoreValue.previousVariables;
+
+      if (!queryStoreValue.loading || shouldNotifyIfLoading) {
         // XXX Currently, returning errors and data is exclusive because we
         // don't handle partial results
 
@@ -362,7 +365,7 @@ export class QueryManager {
                 store: this.getDataWithOptimisticResults(),
                 rootId: queryStoreValue.query.id,
                 selectionSet: queryStoreValue.query.selectionSet,
-                variables: queryStoreValue.variables,
+                variables: queryStoreValue.previousVariables || queryStoreValue.variables,
                 returnPartialData: options.returnPartialData || options.noFetch,
                 fragmentMap: queryStoreValue.fragmentMap,
               }),
@@ -459,7 +462,8 @@ export class QueryManager {
   }
 
   public addQueryListener(queryId: string, listener: QueryListener) {
-    this.queryListeners[queryId] = listener;
+    this.queryListeners[queryId] = this.queryListeners[queryId] || [];
+    this.queryListeners[queryId].push(listener);
   }
 
   // Adds a promise to this.fetchQueryPromises for a given request ID.
@@ -542,7 +546,7 @@ export class QueryManager {
   }
 
   public startQuery(queryId: string, options: WatchQueryOptions, listener: QueryListener) {
-    this.queryListeners[queryId] = listener;
+    this.addQueryListener(queryId, listener);
 
     // If the pollInterval is present, the scheduler has already taken care of firing the first
     // fetch so we don't have to worry about it here.
@@ -648,6 +652,16 @@ export class QueryManager {
       fragments = getFragmentDefinitions(transformedDoc);
     }
 
+    const queryState = this.getApolloState().queries[queryId];
+
+    // If the previous query, for some reason, did not complete correctly, we run the
+    // readSelectionSet in returnPartialData in order to avoid field reading errors
+    const forcePartialData =
+      queryState.loading ||
+      queryState.stopped ||
+      !!queryState.networkError ||
+      !!queryState.graphQLErrors;
+
     const previousResult = readSelectionSetFromStore({
       // In case of an optimistic change, apply reducer on top of the
       // results including previous optimistic updates. Otherwise, apply it
@@ -656,7 +670,7 @@ export class QueryManager {
       rootId: 'ROOT_QUERY',
       selectionSet: queryDefinition.selectionSet,
       variables: queryOptions.variables,
-      returnPartialData: queryOptions.returnPartialData || queryOptions.noFetch,
+      returnPartialData: forcePartialData || queryOptions.returnPartialData || queryOptions.noFetch,
       fragmentMap: createFragmentMap(fragments || []),
     });
 
@@ -948,6 +962,7 @@ export class QueryManager {
     }
 
     const requestId = this.generateRequestId();
+    const shouldFetch = minimizedQuery && !noFetch;
 
     // Initialize query in store with unique requestId
     this.store.dispatch({
@@ -962,11 +977,14 @@ export class QueryManager {
       queryId,
       requestId,
       fragmentMap,
+      // we store the old variables in order to trigger "loading new variables"
+      // state if we know we will go to the server
+      storePreviousVariables: shouldFetch,
     });
 
     // If there is no part of the query we need to fetch from the server (or,
     // noFetch is turned on), we just write the store result as the final result.
-    if (! minimizedQuery || returnPartialData || noFetch) {
+    if (!shouldFetch || returnPartialData) {
       this.store.dispatch({
         type: 'APOLLO_QUERY_RESULT_CLIENT',
         result: { data: storeResult },
@@ -977,7 +995,7 @@ export class QueryManager {
       });
     }
 
-    if (minimizedQuery && !noFetch) {
+    if (shouldFetch) {
       return this.fetchRequest({
         requestId,
         queryId,
@@ -1015,13 +1033,15 @@ export class QueryManager {
 
   private broadcastQueries() {
     const queries = this.getApolloState().queries;
-    forOwn(this.queryListeners, (listener: QueryListener, queryId: string) => {
-      // it's possible for the listener to be undefined if the query is being stopped
-      // See here for more detail: https://github.com/apollostack/apollo-client/issues/231
-      if (listener) {
-        const queryStoreValue = queries[queryId];
-        listener(queryStoreValue);
-      }
+    forOwn(this.queryListeners, (listeners: QueryListener[], queryId: string) => {
+      listeners.forEach((listener: QueryListener) => {
+        // it's possible for the listener to be undefined if the query is being stopped
+        // See here for more detail: https://github.com/apollostack/apollo-client/issues/231
+        if (listener) {
+          const queryStoreValue = queries[queryId];
+          listener(queryStoreValue);
+        }
+      });
     });
   }
 
